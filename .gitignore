@@ -1,0 +1,24 @@
+# Java / Maven
+target/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Docker
+docker-compose.override.yml
+
+# local env / secrets
+.env

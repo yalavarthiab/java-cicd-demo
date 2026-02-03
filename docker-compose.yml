@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  python:
+    build:
+      context: ./python-service
+    image: local/python-cicd-demo:dev
+    ports:
+      - "8000:8000"
+
+  java:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/java-cicd-demo:dev
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHON_SERVICE_URL=http://python:8000/api/time

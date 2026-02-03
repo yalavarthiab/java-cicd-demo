@@ -1,0 +1,99 @@
+name: CI/CD - Java+Python -> EC2 (ECR + SSM)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_JAVA_NAME: java-cicd-demo
+  ECR_PY_NAME: python-cicd-demo
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      java_image: ${{ steps.set_images.outputs.java_image }}
+      py_image: ${{ steps.set_images.outputs.py_image }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (optional)
+        uses: docker/setup-qemu-action@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS account id
+        id: account
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Create ECR repos if missing
+        run: |
+          aws ecr create-repository --repository-name ${{ env.ECR_JAVA_NAME }} --region ${{ env.AWS_REGION }} || true
+          aws ecr create-repository --repository-name ${{ env.ECR_PY_NAME }} --region ${{ env.AWS_REGION }} || true
+
+      - name: Build Java image
+        run: |
+          docker build -t local-java:latest .
+          docker tag local-java:latest ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_JAVA_NAME }}:latest
+          docker tag local-java:latest ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_JAVA_NAME }}:${{ github.sha }}
+          docker push ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_JAVA_NAME }}:latest
+          docker push ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_JAVA_NAME }}:${{ github.sha }}
+
+      - name: Build Python image
+        run: |
+          docker build -t local-py:latest ./python-service
+          docker tag local-py:latest ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_PY_NAME }}:latest
+          docker tag local-py:latest ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_PY_NAME }}:${{ github.sha }}
+          docker push ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_PY_NAME }}:latest
+          docker push ${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_PY_NAME }}:${{ github.sha }}
+
+      - name: Set image outputs
+        id: set_images
+        run: |
+          echo "java_image=${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_JAVA_NAME }}:latest" >> $GITHUB_OUTPUT
+          echo "py_image=${{ steps.account.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_PY_NAME }}:latest" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Trigger SSM Run Command to update compose on EC2
+        env:
+          JAVA_IMAGE: ${{ needs.build-and-push.outputs.java_image }}
+          PY_IMAGE: ${{ needs.build-and-push.outputs.py_image }}
+        run: |
+          cat > /tmp/update.sh <<'EOF'
+          #!/bin/bash
+          set -eux
+          cd /home/ubuntu || exit 0
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com || true
+          sed -i "s|REPLACE_ECR_JAVA_IMAGE:latest|${JAVA_IMAGE}|g" docker-compose.yml || true
+          sed -i "s|REPLACE_ECR_PY_IMAGE:latest|${PY_IMAGE}|g" docker-compose.yml || true
+          docker compose pull || true
+          docker compose up -d
+          EOF
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=tag:Role,Values=deploy-target" \
+            --parameters commands=["bash /tmp/update.sh"] \
+            --comment "Deploy new images from CI" \
+            --timeout-seconds 600

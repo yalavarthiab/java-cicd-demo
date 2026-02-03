@@ -1,0 +1,22 @@
+# Java/Maven
+target
+pom.xml.bak
+*.log
+
+# IDEs
+.vscode
+.idea
+*.iml
+
+# OS / misc
+.DS_Store
+*.swp
+*.swo
+
+# Python
+python-service/__pycache__
+python-service/.venv
+python-service/*.pyc
+
+# Git
+.git
